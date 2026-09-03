@@ -275,6 +275,12 @@ export class Masker {
   private protectPattern: RegExp | null = null;
   private protectPatternDirty = true;
 
+  /** Cached placeholder → real lookup for display-only restoration; see unmaskDisplay(). */
+  private displayLookup: Map<string, string> | null = null;
+  /** Lowercase alias of displayLookup, built only for case-insensitive maskers. */
+  private displayLookupLower: Map<string, string> | null = null;
+  private displayLookupDirty = true;
+
   /** Regex compile errors etc., for the caller to surface via ctx.ui.notify */
   public readonly warnings: string[] = [];
 
@@ -450,6 +456,7 @@ export class Masker {
     this.dynamicMap.set(real, { real, placeholder: candidate, ruleId, description });
     this.protectedValues.add(real);
     this.protectPatternDirty = true;
+    this.displayLookupDirty = true;
     return candidate;
   }
 
@@ -802,6 +809,89 @@ export class Masker {
     result += text.slice(cursor);
 
     return { text: result, count, details: finalizeDetails(detailMap) };
+  }
+
+  // ── display unmask: single-pass restore for display-only surfaces ─────────
+
+  /**
+   * Placeholder → real lookup for display restoration. Literal rules win in
+   * config order (mirroring collectUnmaskSpans), then regex-discovered
+   * dynamic entries; the first registration wins on the (warned-about)
+   * pathological case of two rules sharing one placeholder. Rebuilt only
+   * when a new dynamic placeholder appears or the Masker is reconstructed.
+   */
+  private getDisplayLookup(): { exact: Map<string, string>; lower: Map<string, string> | null } | null {
+    if (!this.displayLookupDirty) {
+      return this.displayLookup === null
+        ? null
+        : { exact: this.displayLookup, lower: this.displayLookupLower };
+    }
+
+    const exact = new Map<string, string>();
+    for (const rule of this.compiledRules) {
+      if (rule.kind !== "literal") continue;
+      if (!exact.has(rule.placeholder)) exact.set(rule.placeholder, rule.real);
+    }
+    for (const entry of this.dynamicMap.values()) {
+      if (!exact.has(entry.placeholder)) exact.set(entry.placeholder, entry.real);
+    }
+    if (exact.size === 0) {
+      this.displayLookup = null;
+      this.displayLookupLower = null;
+      this.displayLookupDirty = false;
+      return null;
+    }
+    let lower: Map<string, string> | null = null;
+    if (this.caseFlag === "i") {
+      lower = new Map<string, string>();
+      for (const [placeholder, real] of exact) {
+        const key = placeholder.toLowerCase();
+        if (!lower.has(key)) lower.set(key, real);
+      }
+    }
+    this.displayLookup = exact;
+    this.displayLookupLower = lower;
+    this.displayLookupDirty = false;
+    return { exact, lower };
+  }
+
+  /**
+   * Restore every known placeholder in `text` in a single pass, for
+   * display-only surfaces (assistant text/thinking markdown rendering).
+   *
+   * Unlike unmask(), this returns a bare string with no details and treats
+   * the protect pattern's longest-first alternation as the match arbiter,
+   * which keeps per-render cost at one regex scan plus one replacement pass
+   * even for very long streaming content. Storage and provider-boundary
+   * paths keep using unmask()/maskValue(); this method never mutates state
+   * and is safe to call on every render frame.
+   */
+  unmaskDisplay(text: string): string {
+    if (typeof text !== "string" || text.length === 0) return text;
+    const protect = this.getProtectPattern();
+    if (protect === null) return text;
+
+    // Fast path: most rendered content contains no placeholder at all, so a
+    // single anchored scan avoids building replacement output entirely.
+    protect.lastIndex = 0;
+    if (!protect.test(text)) {
+      protect.lastIndex = 0;
+      return text;
+    }
+    protect.lastIndex = 0;
+
+    const lookup = this.getDisplayLookup();
+    if (lookup === null) return text;
+    const { exact, lower } = lookup;
+    return text.replace(protect, (matched) => {
+      const direct = exact.get(matched);
+      if (direct !== undefined) return direct;
+      if (lower !== null) {
+        const ci = lower.get(matched.toLowerCase());
+        if (ci !== undefined) return ci;
+      }
+      return matched;
+    });
   }
 
   // ── Arbitrary-depth objects (recurse over all string values, keys untouched) ──

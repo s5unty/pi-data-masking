@@ -441,3 +441,66 @@ test("skipped invented regions stay free for lower-priority protected rules", ()
   // Round-trips back to the real value.
   assert.equal(m.unmask(assistant.text).text, "token-abc");
 });
+
+// ── unmaskDisplay: single-pass display-only restoration ─────────────────────
+
+test("unmaskDisplay: restores literal placeholders without touching state", () => {
+  const m = makeMasker([
+    { id: "k", real: "sk-prod-abc123456789", placeholder: "sk-nqpz-mwx847312654" },
+  ]);
+  const text = "checking sk-nqpz-mwx847312654 against the docs";
+  assert.equal(m.unmaskDisplay(text), "checking sk-prod-abc123456789 against the docs");
+  // Idempotent and cheap on already-restored text.
+  assert.equal(m.unmaskDisplay("checking sk-prod-abc123456789"), "checking sk-prod-abc123456789");
+});
+
+test("unmaskDisplay: restores regex-discovered dynamic placeholders", () => {
+  const m = makeMasker([{ id: "tok", type: "regex", pattern: "token_[A-Za-z0-9]{8}" }]);
+  const masked = m.mask("value token_abcd1234 here", { discover: true });
+  assert.notEqual(masked.text, "value token_abcd1234 here");
+  const restored = m.unmaskDisplay(masked.text);
+  assert.equal(restored, "value token_abcd1234 here");
+  // Text without any placeholder passes through unchanged.
+  assert.equal(m.unmaskDisplay("nothing sensitive here"), "nothing sensitive here");
+});
+
+test("unmaskDisplay: matches unmask() semantics on mixed content", () => {
+  const real1 = "sk-prod-abc123456789";
+  const m = makeMasker([
+    { id: "k", real: real1, placeholder: generatePlaceholder(real1, KEY) },
+    { id: "tok", type: "regex", pattern: "token_[A-Za-z0-9]{8}" },
+  ]);
+  const sample = `thinking about ${real1} and token_zx9q1122 ...`;
+  const masked = m.mask(sample, { discover: true });
+  assert.equal(m.unmaskDisplay(masked.text), sample);
+});
+
+test("unmaskDisplay: longest placeholder wins when one contains another", () => {
+  const m = makeMasker([
+    { id: "short", real: "short-secret", placeholder: "ph-short" },
+    { id: "long", real: "long-secret-value", placeholder: "ph-short-extended" },
+  ]);
+  // "ph-short-extended" must not be partially restored via "ph-short".
+  assert.equal(
+    m.unmaskDisplay("a ph-short-extended b ph-short c"),
+    "a long-secret-value b short-secret c"
+  );
+});
+
+test("unmaskDisplay: case-insensitive mode restores case-variant placeholders", () => {
+  const m = new Masker(
+    [{ id: "k", real: "real-value", placeholder: "Ph-Holder" }],
+    false,
+    KEY,
+    new Map(),
+    new Set(),
+    new Set()
+  );
+  assert.equal(m.unmaskDisplay("x PH-HOLDER y"), "x real-value y");
+});
+
+test("unmaskDisplay: empty masker returns the input unchanged", () => {
+  const m = makeMasker([]);
+  const text = "plain assistant output";
+  assert.equal(m.unmaskDisplay(text), text);
+});

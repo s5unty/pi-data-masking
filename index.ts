@@ -9,6 +9,10 @@
  *                          AI's response is stored in the conversation
  *  3. tool_call event   — pre-execution unmasking: restore tool arguments in
  *                          place so tools run with real values
+ *  4. markdown transformer — display-only unmasking: assistant text and
+ *                          thinking render with real values from the first
+ *                          streaming delta, so long responses never paint
+ *                          placeholders into terminal scrollback
  *
  * Provenance (first-seen is forever):
  *  - Values first seen in LLM output are never masked for the session
@@ -789,6 +793,32 @@ export default async function (pi: ExtensionAPI) {
       }
     }
   }
+
+  // ── Display restoration (TUI live view) ─────────────────────────────────
+
+  // Restore real values in rendered assistant text and thinking markdown —
+  // including while the response is still streaming. Without this, the TUI
+  // displays raw model output (which contains placeholders) until message_end
+  // swaps in the restored message; for very long thinking output the masked
+  // rendering is committed to terminal scrollback line-by-line and remains
+  // visible after completion even though stored history is fully restored.
+  //
+  // This hook is display-only by contract: it never touches session storage,
+  // model-facing context, or tool arguments, and it runs synchronously on
+  // every render — hence the single-pass unmaskDisplay() fast path. Only
+  // assistant content is transformed: user messages already hold real values
+  // locally. Runs for streaming updates, finalized messages, and restored
+  // session messages; pi's web client does not use this hook and instead
+  // applies the message_end restoration when the message finalizes.
+  // Optional chaining keeps the extension loadable on older pi cores (and
+  // minimal test harnesses) whose ExtensionAPI predates this hook.
+  pi.registerMarkdownTransformer?.((markdown, renderCtx) => {
+    if (renderCtx.messageType !== "assistant" && renderCtx.messageType !== "assistant-thinking") {
+      return markdown;
+    }
+    if (!config.enabled || config.rules.length === 0) return markdown;
+    return masker.unmaskDisplay(markdown);
+  });
 
   // ── Session lifecycle ─────────────────────────────────────────────────────
 

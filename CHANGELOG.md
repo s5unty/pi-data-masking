@@ -10,6 +10,11 @@ The entries before 0.4.0 were reconstructed from the Git history and existing ta
 
 ### Added
 
+- Restore real values in rendered assistant text and thinking (including while a
+  response is still streaming), so very long thinking output no longer leaves
+  masked placeholders visible in the terminal scrollback after completion; the
+  transform is display-only and stays synchronized with message-end
+  restoration.
 - Warn when an exact literal or custom placeholder equals a bundled common
   semantic term, with separate acknowledgements for input-side ambiguity and
   accidental tool-argument restoration; generated placeholders avoid the same
