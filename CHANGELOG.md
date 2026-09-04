@@ -10,6 +10,13 @@ The entries before 0.4.0 were reconstructed from the Git history and existing ta
 
 ### Added
 
+- Restore real values in the provider stream itself (via a per-provider stream
+  wrapper registered on session start and model selection), so every UI —
+  including pi's web client, which does not use the markdown transformer —
+  shows real values from the first streaming delta instead of placeholders;
+  placeholders split across stream chunks are buffered until whole, tool
+  arguments are still restored only at tool execution, and transform failures
+  fall back to passing events through untouched.
 - Restore real values in rendered assistant text and thinking (including while a
   response is still streaming), so very long thinking output no longer leaves
   masked placeholders visible in the terminal scrollback after completion; the

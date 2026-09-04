@@ -12,7 +12,13 @@
  *  4. markdown transformer — display-only unmasking: assistant text and
  *                          thinking render with real values from the first
  *                          streaming delta, so long responses never paint
- *                          placeholders into terminal scrollback
+ *                          placeholders into terminal scrollback (TUI only;
+ *                          pi's web client does not use this hook)
+ *  5. provider stream wrapper — data-level unmasking: AssistantMessageEvents
+ *                          are rewritten before they enter pi's event
+ *                          pipeline, so every UI (TUI, pi-web, web UIs built
+ *                          on the SDK) streams real values instead of
+ *                          placeholders
  *
  * Provenance (first-seen is forever):
  *  - Values first seen in LLM output are never masked for the session
@@ -44,6 +50,14 @@
  */
 
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  createAssistantMessageEventStream,
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  type AssistantMessageEventStream,
+  type Model,
+  type Provider,
+} from "@earendil-works/pi-ai";
 import { Editor, Key, decodeKittyPrintable, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { EditorTheme } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
@@ -217,6 +231,144 @@ function configuredRuleDetail(configured: ConfiguredMaskingRule, showExactValues
 }
 
 // ─── Extension entry point ──────────────────────────────────────────────────
+
+// ── Stream restoration (provider-level, all UIs) ───────────────────────────
+
+/** Accumulated stream state for one content block (text or thinking). */
+export interface StreamRestoreBlockState {
+  /** Raw (still-masked) text received for the block so far. */
+  raw: string;
+  /** How much of the restored text has already been emitted as deltas. */
+  emittedLen: number;
+}
+
+/** The subset of Masker the stream transformer needs (also satisfiable by test doubles). */
+export type StreamRestoreMasker = Pick<Masker, "unmaskDisplay" | "displayHoldbackLength">;
+
+/**
+ * Build the provider-stream transformer: rewrite AssistantMessageEvents so
+ * placeholders are restored to real values before they enter pi's event
+ * pipeline. This is the data-level fix that makes streaming show real values
+ * in every UI — TUI, pi-web, and any web UI built on pi's SDK — because they
+ * all consume the same event stream (the TUI renders the partial message, web
+ * clients accumulate deltas append-only and finalize from message.end).
+ *
+ * Deltas carry only the confirmed prefix of the restored text: a trailing
+ * fragment that could be the start of a placeholder is held back until the
+ * next event resolves it, so a placeholder split across deltas is never
+ * painted as a partial string. Tool arguments are deliberately not rewritten
+ * here (partial JSON repair is unsafe); they keep using the tool_call hook.
+ *
+ * The masker is read through a getter so mid-session config swaps take effect
+ * immediately and tests can inject their own instance.
+ */
+export function createStreamRestore(getMasker: () => StreamRestoreMasker): {
+  transformEvent: (event: AssistantMessageEvent, blocks: Map<number, StreamRestoreBlockState>) => AssistantMessageEvent;
+  wrap: (upstream: AssistantMessageEventStream) => AssistantMessageEventStream;
+} {
+  const restoreBlockText = (partial: AssistantMessage | undefined, contentIndex: number, restored: string): void => {
+    const block = partial?.content?.[contentIndex];
+    if (!block) return;
+    if (block.type === "text") block.text = restored;
+    else if (block.type === "thinking") block.thinking = restored;
+  };
+
+  const restoreMessageStrings = (message: AssistantMessage | undefined): void => {
+    for (const block of message?.content ?? []) {
+      if (block.type === "text") block.text = getMasker().unmaskDisplay(block.text);
+      else if (block.type === "thinking") block.thinking = getMasker().unmaskDisplay(block.thinking);
+    }
+  };
+
+  const transformEvent = (
+    event: AssistantMessageEvent,
+    blocks: Map<number, StreamRestoreBlockState>,
+  ): AssistantMessageEvent => {
+    switch (event.type) {
+      case "text_delta":
+      case "thinking_delta": {
+        const m = getMasker();
+        const state = blocks.get(event.contentIndex) ?? { raw: "", emittedLen: 0 };
+        blocks.set(event.contentIndex, state);
+        state.raw += event.delta;
+        const candidate = m.unmaskDisplay(state.raw);
+        // Keep the partial the TUI renders in sync with the restored text.
+        restoreBlockText(event.partial, event.contentIndex, candidate);
+        const confirmed = candidate.length - m.displayHoldbackLength(candidate);
+        let delta = "";
+        if (confirmed >= state.emittedLen) {
+          delta = candidate.slice(state.emittedLen, confirmed);
+          state.emittedLen = confirmed;
+        }
+        // A shrunken confirmed region (hold-back miss) emits nothing here;
+        // the *_end/done events repair the full text instead.
+        return { ...event, delta };
+      }
+      case "text_end":
+      case "thinking_end": {
+        const restored = getMasker().unmaskDisplay(event.content);
+        restoreBlockText(event.partial, event.contentIndex, restored);
+        const state = blocks.get(event.contentIndex);
+        if (state) state.emittedLen = restored.length;
+        return { ...event, content: restored };
+      }
+      case "done":
+        restoreMessageStrings(event.message);
+        blocks.clear();
+        return event;
+      case "error":
+        restoreMessageStrings(event.error);
+        blocks.clear();
+        return event;
+      default:
+        return event;
+    }
+  };
+
+  const wrap = (upstream: AssistantMessageEventStream): AssistantMessageEventStream => {
+    try {
+      const out = createAssistantMessageEventStream();
+      const blocks = new Map<number, StreamRestoreBlockState>();
+      let lastPartial: AssistantMessage | undefined;
+      void (async () => {
+        try {
+          for await (const event of upstream) {
+            if ("partial" in event) lastPartial = event.partial;
+            let next = event;
+            try {
+              next = transformEvent(event, blocks);
+            } catch {
+              next = event; // transform bug must never break the stream
+            }
+            out.push(next);
+          }
+          out.end();
+        } catch (err) {
+          // Iterator failure: surface a well-formed error event instead of
+          // leaving consumers waiting on result() forever.
+          try {
+            if (lastPartial) {
+              const message: AssistantMessage = {
+                ...lastPartial,
+                stopReason: "error",
+                errorMessage: err instanceof Error ? err.message : String(err),
+              };
+              out.push({ type: "error", reason: "error", error: message });
+            }
+          } catch {
+            // nothing more we can do
+          }
+          out.end();
+        }
+      })();
+      return out;
+    } catch {
+      return upstream; // construction failed — pass the stream through untouched
+    }
+  };
+
+  return { transformEvent, wrap };
+}
 
 export default async function (pi: ExtensionAPI) {
   let config: MaskingConfig = {
@@ -820,9 +972,61 @@ export default async function (pi: ExtensionAPI) {
     return masker.unmaskDisplay(markdown);
   });
 
+  // ── Stream restoration (provider-level, all UIs) ───────────────────────
+
+  // Rewrites provider stream events so placeholders become real values before
+  // they reach pi's event pipeline. This is what makes streaming show real
+  // values in pi's web client (whose render pipeline ignores the markdown
+  // transformer above) and doubles as a data-level guarantee for the TUI.
+  // See docs/stream-restore-design.md for the full design.
+  const streamRestore = createStreamRestore(() => masker);
+  // Pristine provider streams, captured before any registration so the
+  // delegation never recurses into our own wrapper (a composed provider's
+  // streamWith closure keeps the extension binding from its composition time).
+  const pristineProviderStreams = new Map<string, Provider["stream"]>();
+  const streamRestoredApis = new Map<string, string>();
+
+  const ensureStreamDisplayRestore = (model: Model<any> | undefined, ctx: ExtensionContext): void => {
+    if (!model?.provider || !model.api) return;
+    const providerId = model.provider;
+    if (streamRestoredApis.get(providerId) === model.api) return;
+    let stream = pristineProviderStreams.get(providerId);
+    if (!stream) {
+      let provider: Provider | undefined;
+      try {
+        provider = ctx.modelRegistry.getProvider(providerId);
+      } catch {
+        provider = undefined;
+      }
+      const fn = provider?.stream;
+      if (typeof fn !== "function") return;
+      stream = fn.bind(provider);
+      pristineProviderStreams.set(providerId, stream);
+    }
+    const pristine = stream;
+    try {
+      // registerProvider applies immediately and merges over previous
+      // registrations; refresh({ allowNetwork: false }) it triggers is
+      // offline-safe. Optional chaining keeps older cores loadable — they
+      // simply keep today's behavior (mask restored at message_end only).
+      pi.registerProvider?.(providerId, {
+        api: model.api,
+        streamSimple: (m, c, o) => streamRestore.wrap(pristine(m, c, o)),
+      });
+      streamRestoredApis.set(providerId, model.api);
+    } catch {
+      // Registration refused — leave streaming untouched.
+    }
+  };
+
+  pi.on("model_select", (event, ctx) => {
+    ensureStreamDisplayRestore(event.model, ctx);
+  });
+
   // ── Session lifecycle ─────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    ensureStreamDisplayRestore(ctx.model, ctx);
     stopWatching?.();
     const branchEntries = ctx.sessionManager.getBranch() as unknown as SessionEntryLike[];
     const restored = restoreHistory(branchEntries);

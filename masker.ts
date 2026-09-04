@@ -279,6 +279,8 @@ export class Masker {
   private displayLookup: Map<string, string> | null = null;
   /** Lowercase alias of displayLookup, built only for case-insensitive maskers. */
   private displayLookupLower: Map<string, string> | null = null;
+  /** Cached known-placeholder list for stream hold-back; see displayHoldbackLength(). */
+  private displayPlaceholders: Array<{ p: string; len: number }> | null = null;
   private displayLookupDirty = true;
 
   /** Regex compile errors etc., for the caller to surface via ctx.ui.notify */
@@ -838,6 +840,7 @@ export class Masker {
     if (exact.size === 0) {
       this.displayLookup = null;
       this.displayLookupLower = null;
+      this.displayPlaceholders = null;
       this.displayLookupDirty = false;
       return null;
     }
@@ -892,6 +895,59 @@ export class Masker {
       }
       return matched;
     });
+  }
+
+  /**
+   * Every known placeholder string (literal rules in config order, then
+   * regex-discovered dynamic entries). Backs stream-level prefix hold-back;
+   * rebuilt together with the display lookup.
+   */
+  getKnownPlaceholders(): string[] {
+    const cached = this.getDisplayPlaceholderCache();
+    return cached === null ? [] : cached.list.map((entry) => entry.p);
+  }
+
+  /**
+   * Length of the longest suffix of `text` that is a strict prefix of some
+   * known placeholder. Callers pass post-unmaskDisplay() text, so complete
+   * placeholders never appear here and only potentially-incomplete ones are
+   * held back while streaming. Case-insensitive maskers compare lowercased.
+   */
+  displayHoldbackLength(text: string): number {
+    if (typeof text !== "string" || text.length === 0) return 0;
+    const cached = this.getDisplayPlaceholderCache();
+    if (cached === null) return 0;
+    const hay = cached.caseInsensitive ? text.toLowerCase() : text;
+    let best = 0;
+    for (const { p, len } of cached.list) {
+      const limit = Math.min(len - 1, hay.length);
+      for (let l = limit; l > best; l--) {
+        if (hay.endsWith(p.slice(0, l))) {
+          best = l;
+          break;
+        }
+      }
+    }
+    return best;
+  }
+
+  private getDisplayPlaceholderCache(): { list: Array<{ p: string; len: number }>; caseInsensitive: boolean } | null {
+    if (!this.displayLookupDirty) return this.displayPlaceholders === null ? null : { list: this.displayPlaceholders, caseInsensitive: this.caseFlag === "i" };
+    const seen = new Set<string>();
+    const list: Array<{ p: string; len: number }> = [];
+    for (const rule of this.compiledRules) {
+      if (rule.kind !== "literal") continue;
+      if (seen.has(rule.placeholder)) continue;
+      seen.add(rule.placeholder);
+      list.push({ p: this.caseFlag === "i" ? rule.placeholder.toLowerCase() : rule.placeholder, len: rule.placeholder.length });
+    }
+    for (const entry of this.dynamicMap.values()) {
+      if (seen.has(entry.placeholder)) continue;
+      seen.add(entry.placeholder);
+      list.push({ p: this.caseFlag === "i" ? entry.placeholder.toLowerCase() : entry.placeholder, len: entry.placeholder.length });
+    }
+    this.displayPlaceholders = list.length === 0 ? null : list;
+    return this.displayPlaceholders === null ? null : { list, caseInsensitive: this.caseFlag === "i" };
   }
 
   // ── Arbitrary-depth objects (recurse over all string values, keys untouched) ──
