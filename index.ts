@@ -49,7 +49,7 @@
  *
  */
 
-import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -58,9 +58,11 @@ import {
   type Model,
   type Provider,
 } from "@earendil-works/pi-ai";
+import { getApiProvider, registerBuiltInApiProviders } from "@earendil-works/pi-ai/compat";
+import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { Editor, Key, decodeKittyPrintable, matchesKey, sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { EditorTheme } from "@earendil-works/pi-tui";
-import { existsSync } from "node:fs";
+import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { createHmac } from "node:crypto";
 import { resolve } from "node:path";
 import { Masker, isRegexRule } from "./masker.ts";
@@ -370,7 +372,91 @@ export function createStreamRestore(getMasker: () => StreamRestoreMasker): {
   return { transformEvent, wrap };
 }
 
+/**
+ * Process-wide slot for the active stream restore (see createStreamRestore).
+ *
+ * pi-web's session daemon loads global extensions once against a shared
+ * ModelRuntime and then freezes every later provider mutation
+ * (bootstrapAndFreezeGlobalExtensionProviders). The streamSimple wrapper that
+ * actually reaches streaming is therefore the one queued at extension factory
+ * time — possibly by the daemon's throwaway bootstrap instance, whose masker
+ * has no session state. The queued wrapper is instance-agnostic: it delegates
+ * through this slot to whichever live extension instance armed itself last
+ * (before_agent_start), so the real per-session masker performs the restore.
+ *
+ * Concurrency note: when two sessions stream at once, the one that armed most
+ * recently wins. Restoring with a foreign session's masker is a harmless no-op
+ * (placeholders are sessionKey-derived), so the loser simply degrades to the
+ * pre-fix behavior (restore at message_end) instead of corrupting output.
+ */
+const STREAM_RESTORE_SLOT = "__piDataMaskingStreamRestore";
+
+interface StreamRestoreLike {
+  wrap(stream: AssistantMessageEventStream): AssistantMessageEventStream;
+}
+
+function armStreamRestore(getRestore: () => StreamRestoreLike): void {
+  (globalThis as Record<string, unknown>)[STREAM_RESTORE_SLOT] = { restore: getRestore };
+}
+
+function wrapWithActiveRestore(stream: AssistantMessageEventStream): AssistantMessageEventStream {
+  const slot = (globalThis as Record<string, unknown>)[STREAM_RESTORE_SLOT] as
+    | { restore: () => StreamRestoreLike | undefined }
+    | undefined;
+  const restore = slot?.restore();
+  return restore ? restore.wrap(stream) : stream;
+}
+
 export default async function (pi: ExtensionAPI) {
+  // pi-web's session daemon freezes provider mutations on the shared runtime
+  // after a one-time bootstrap; only factory-time queued registrations (which
+  // are applied before the freeze) survive there. So register stream-restoring
+  // wrappers eagerly for every known provider, delegating to the live session
+  // instance via STREAM_RESTORE_SLOT. In the CLI the same registrations simply
+  // apply at runner init — behavior there is unchanged.
+  const debugStream = process.env.PI_DATA_MASKING_DEBUG === "1";
+  const dbgLog = (msg: string): void => {
+    if (!debugStream) return;
+    try { appendFileSync("/tmp/pi-data-masking-stream.log", `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ }
+  };
+  try {
+    registerBuiltInApiProviders();
+    const providerApis = new Map<string, string>();
+    for (const providerId of getBuiltinProviders()) {
+      const model = getBuiltinModels(providerId)[0];
+      if (model?.api) providerApis.set(providerId, model.api);
+    }
+    // models.json-defined (config) providers are not part of the builtin catalog.
+    try {
+      const modelsPath = resolve(getAgentDir(), "models.json");
+      if (existsSync(modelsPath)) {
+        const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as {
+          providers?: Record<string, { api?: string }>;
+        };
+        for (const [providerId, providerConfig] of Object.entries(parsed.providers ?? {})) {
+          if (providerConfig?.api && !providerApis.has(providerId)) {
+            providerApis.set(providerId, providerConfig.api);
+          }
+        }
+      }
+    } catch { /* models.json is optional */ }
+    for (const [providerId, api] of providerApis) {
+      const apiImpl = getApiProvider(api);
+      if (!apiImpl?.streamSimple) continue;
+      pi.registerProvider?.(providerId, {
+        api,
+        streamSimple: (model, context, options) => {
+          dbgLog(`stream wrapper invoked: ${providerId}@${api}`);
+          return wrapWithActiveRestore(apiImpl.streamSimple(model, context, options));
+        },
+      });
+    }
+    dbgLog(`eager registration done: ${[...providerApis.keys()].join(",")}`);
+  } catch {
+    // Best effort: older cores or unusual hosts simply keep the lazy
+    // registration path in ensureStreamDisplayRestore below.
+  }
+
   let config: MaskingConfig = {
     enabled: false,
     rules: [],
@@ -1011,7 +1097,7 @@ export default async function (pi: ExtensionAPI) {
       // simply keep today's behavior (mask restored at message_end only).
       pi.registerProvider?.(providerId, {
         api: model.api,
-        streamSimple: (m, c, o) => streamRestore.wrap(pristine(m, c, o)),
+        streamSimple: (m, c, o) => { dbgLog("WRAPPER INVOKED"); return streamRestore.wrap(pristine(m, c, o)); },
       });
       streamRestoredApis.set(providerId, model.api);
     } catch {
@@ -1028,6 +1114,11 @@ export default async function (pi: ExtensionAPI) {
   // fires before every prompt with the model resolved. Idempotent, so the
   // earlier hooks make this a no-op in the common case.
   pi.on("before_agent_start", (_event, ctx) => {
+    // Arm the process-wide slot so the factory-time queued provider wrappers
+    // (see top of this file) delegate to THIS instance's live masker. arming
+    // here — right before the stream starts — also keeps concurrent sessions
+    // as fresh as possible.
+    armStreamRestore(() => streamRestore);
     ensureStreamDisplayRestore(ctx.model, ctx);
   });
 
