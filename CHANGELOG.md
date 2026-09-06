@@ -4,53 +4,39 @@
 
 ### Fixed
 
-- Register the provider stream wrappers at extension factory time instead of
-  lazily on session start or model selection. pi-web's session daemon freezes
-  all provider mutations on its shared ModelRuntime after a one-time global
-  extension bootstrap, so the lazy registration was silently ignored there
-  and live streaming deltas reached the browser still masked (only the final
-  message was restored). Factory-time queued registrations are applied before
-  the freeze, so streaming now shows real values from the first delta in
-  pi-web as well. The wrapper delegates through a process-wide slot to the
-  live session instance armed before each prompt, keeping per-session masker
-  state authoritative; concurrent sessions degrade gracefully to end-of-
-  message restoration instead of cross-restoring placeholders.
-- Keep the lazy pristine-stream registration path as a fallback for hosts
-  without a provider freeze, and restrict the new debug logging behind
-  `PI_DATA_MASKING_DEBUG=1`.
+- Fix live streaming in @jmfederico/pi-web still showing masked placeholders:
+  register the provider stream wrappers at extension load time so the
+  registration survives pi-web's post-bootstrap provider freeze; real values
+  now appear from the first streaming delta. Other hosts and web UIs that load
+  extensions normally already benefited from data-level stream restoration and
+  are unaffected.
 
 ## [0.6.2] - 2026-09-01
 
 ### Added
 
-- Restore real values in the provider stream itself (via a per-provider stream
-  wrapper registered on session start and model selection), so every UI —
-  including pi's web client, which does not use the markdown transformer —
-  shows real values from the first streaming delta instead of placeholders;
-  placeholders split across stream chunks are buffered until whole, tool
-  arguments are still restored only at tool execution, and transform failures
-  fall back to passing events through untouched.
-- Restore real values in rendered assistant text and thinking (including while a
-  response is still streaming), so very long thinking output no longer leaves
-  masked placeholders visible in the terminal scrollback after completion; the
-  transform is display-only and stays synchronized with message-end
-  restoration.
-- Warn when an exact literal or custom placeholder equals a bundled common
-  semantic term, with separate acknowledgements for input-side ambiguity and
-  accidental tool-argument restoration; generated placeholders avoid the same
-  high-risk term list.
+- Real values now appear from the first streaming delta in every UI, including
+  pi's web client: assistant text and thinking are restored live as the model
+  streams them, so long thinking output no longer leaves masked placeholders
+  in the terminal scrollback after completion.
+- Tool arguments are still restored only at tool execution; stream transform
+  failures fall back to passing events through untouched, so a transform bug
+  can never break streaming.
+- Warn when a literal value or custom placeholder collides with a bundled
+  common term (e.g. a word that also appears in normal prose), so ambiguous
+  rules are caught before they cause accidental unmasking.
 
 ### Changed
 
-- Improve the `/masking` configuration home with faster rule navigation, direct
-  JSON editing, sensitive-value visibility controls, and clearer compact layouts.
-- Streamline rule creation with global scope by default, generated IDs, immediate
-  test previews, and validation when saving.
+- The `/masking` configuration home is faster to navigate, with direct JSON
+  editing, sensitive-value visibility controls, and clearer compact layouts.
+- Creating a global rule is simpler: global scope by default, generated IDs,
+  immediate test previews, and validation when saving.
 
 ### Fixed
 
-- Prevent history comparisons from repeatedly rewinding a shared prefix to the
-  start of a word without making progress.
+- `/masking-history` comparisons no longer repeatedly rewind a shared prefix
+  to the start of a word without making progress.
 
 ## [0.6.1] - 2026-08-29
 
