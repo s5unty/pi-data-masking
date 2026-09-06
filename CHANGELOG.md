@@ -1,10 +1,23 @@
 # Changelog
 
-All notable changes to this project are documented in this file.
-
-The entries before 0.4.0 were reconstructed from the Git history and existing tags because the project did not previously publish GitHub Releases.
-
 ## [Unreleased]
+
+### Fixed
+
+- Register the provider stream wrappers at extension factory time instead of
+  lazily on session start or model selection. pi-web's session daemon freezes
+  all provider mutations on its shared ModelRuntime after a one-time global
+  extension bootstrap, so the lazy registration was silently ignored there
+  and live streaming deltas reached the browser still masked (only the final
+  message was restored). Factory-time queued registrations are applied before
+  the freeze, so streaming now shows real values from the first delta in
+  pi-web as well. The wrapper delegates through a process-wide slot to the
+  live session instance armed before each prompt, keeping per-session masker
+  state authoritative; concurrent sessions degrade gracefully to end-of-
+  message restoration instead of cross-restoring placeholders.
+- Keep the lazy pristine-stream registration path as a fallback for hosts
+  without a provider freeze, and restrict the new debug logging behind
+  `PI_DATA_MASKING_DEBUG=1`.
 
 ## [0.6.2] - 2026-09-01
 
