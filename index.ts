@@ -1023,6 +1023,14 @@ export default async function (pi: ExtensionAPI) {
     ensureStreamDisplayRestore(event.model, ctx);
   });
 
+  // Safety net for headless/web sessions where the model may be configured
+  // after session_start without a model_select event: before_agent_start
+  // fires before every prompt with the model resolved. Idempotent, so the
+  // earlier hooks make this a no-op in the common case.
+  pi.on("before_agent_start", (_event, ctx) => {
+    ensureStreamDisplayRestore(ctx.model, ctx);
+  });
+
   // ── Session lifecycle ─────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
