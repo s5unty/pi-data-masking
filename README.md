@@ -1,12 +1,8 @@
 # pi-data-masking
 
-**Mask sensitive values before they reach the LLM provider, then restore them locally for display and tool execution.**
+pi-data-masking is a Pi agent extension that replaces configured values—secrets or anything else you don't want the model to see—with stable, realistic-looking placeholders before a request reaches the model. The real values remain in Pi's local conversation and are restored only when a tool needs them.
 
-pi-data-masking is a Pi extension that replaces configured secrets with stable, realistic-looking placeholders before a request reaches the model. The real values remain in Pi's local conversation and are restored only when a tool needs them.
-
-Use pi-data-masking to prevent configured API keys, access tokens, private hostnames, and connection credentials from being sent unchanged to an LLM provider in Pi when the model only needs to pass them to tools—not when it must analyze their exact contents.
-
-> **Boundary:** Masking applies only before requests reach the LLM provider. Pi's local session files retain the original conversation, and matching tool arguments are restored locally before execution.
+Use pi-data-masking to keep any configured content out of the LLM provider's view in Pi: API keys, access tokens, private hostnames, connection credentials, internal URLs, customer data, proprietary code snippets, or simply text you prefer the model never reads. It works best when the model only needs to pass such values through to tools—not when it must analyze their exact contents.
 
 ```text
 user/tool data → mask → LLM → restore tool arguments → tool uses real data
@@ -25,8 +21,9 @@ user/tool data → mask → LLM → restore tool arguments → tool uses real da
 
 ## Use cases
 
-- Pass API keys and access tokens through model-generated tool calls without exposing the real values to the provider.
+- Pass API keys, access tokens, and credentials through model-generated tool calls without exposing the real values to the provider.
 - Let the model work with private hostnames and connection strings through structure-preserving substitutes.
+- Hide non-secret content you still don't want the model to read—internal system names, customer or personal data, proprietary snippets, or any sensitive text matched by a rule.
 - Audit exactly how local conversation content was transformed before reaching the model.
 - Keep model-facing conversation prefixes stable across repeated requests and review rule changes before they disrupt cache reuse.
 
@@ -175,7 +172,7 @@ Test input remains local and does not enter model context, session history, conf
 
 ## Security model and limitations
 
-> Do not mask a value whose exact characters or meaning the model must analyze. A realistic placeholder is an operational substitute, not a semantic equivalent. Even when a task is not explicitly about the secret, the model may infer properties from the placeholder and generate code based on them.
+> Do not mask a value whose exact characters or meaning the model must analyze—whether it is a secret or not. A realistic placeholder is an operational substitute, not a semantic equivalent. Even when a task is not explicitly about the hidden value, the model may infer properties from the placeholder and generate code based on them.
 
 Masking has several inherent limitations:
 
@@ -213,7 +210,7 @@ Other options are `caseSensitive`, `showStatusBar`, and `systemPromptGuidance`; 
 
 ## FAQ
 
-### How is this different from replacing secrets with `[REDACTED]`?
+### How is this different from replacing values with `[REDACTED]`?
 
 Generated placeholders preserve recognizable structure, reducing the chance that the model treats a value as missing. They remain substitutes, not semantically equivalent or encrypted versions of the original values.
 
@@ -223,7 +220,7 @@ No. Masking applies at the LLM-provider boundary; Pi's local session files still
 
 ### Does it automatically detect every secret or piece of PII?
 
-No. Only values matched by configured literal, environment, preset, or regex rules are masked.
+No. Only values matched by configured literal, environment, preset, or regex rules are masked—whether they are secrets or any other content you choose to hide.
 
 ### Do tools receive the original value?
 
