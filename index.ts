@@ -98,6 +98,7 @@ import type {
 } from "./config-loader.ts";
 import { generatePlaceholder, generateSessionKey } from "./placeholder-gen.ts";
 import { MASKING_PRESETS } from "./presets.ts";
+import { statusLabel } from "./status-format.ts";
 import {
   createEpochHistoryViewer,
   createHistoryViewer,
@@ -171,14 +172,6 @@ function unmaskMessage<T>(
 ): { message: T } {
   const r = masker.unmaskValue(message);
   return { message: r.value as T };
-}
-
-function statusLabel(cfg: MaskingConfig): string {
-  const configured = cfg.configuredRules.length;
-  const active = cfg.rules.length;
-  return cfg.enabled
-    ? `🔒 Masking: ${active} active / ${configured} configured`
-    : `🔓 Masking: off · ${active} rule(s) ready`;
 }
 
 function configuredRuleKey(configured: ConfiguredMaskingRule): string {

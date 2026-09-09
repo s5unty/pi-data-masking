@@ -18,6 +18,7 @@ import { isRegexRule, MAX_COLLISION_ATTEMPTS, type MaskingRule, type PreserveStr
 import { expandMaskingPreset, getMaskingPreset } from "./presets.ts";
 import { analyzeRegexSafety } from "./regex-safety.ts";
 import { isCommonSemanticValue } from "./common-semantic-terms.ts";
+import { parseStatusBarFormat, type StatusBarFormat } from "./status-format.ts";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,8 @@ export interface MaskingOptions {
   caseSensitive: boolean;
   /** Whether to show masking status in the bottom status bar (default true) */
   showStatusBar: boolean;
+  /** User-defined status text templates; omitted states use the original text. */
+  statusBarFormat?: StatusBarFormat;
   /** Whether to append a guidance paragraph to the system prompt telling the
    *  LLM that masked values are opaque placeholders and must not be inferred
    *  from or transformed (default false). */
@@ -345,7 +348,8 @@ export async function savePersistentToggle(
  */
 function mergeConfigs(
   global: Partial<MaskingConfig> | null,
-  project: Partial<MaskingConfig> | null
+  project: Partial<MaskingConfig> | null,
+  warnings: string[],
 ): MaskingConfig {
   const base = defaultConfig();
 
@@ -356,6 +360,10 @@ function mergeConfigs(
     ...base.options,
     ...(global?.options ?? {}),
     ...(project?.options ?? {}),
+    statusBarFormat: {
+      ...parseStatusBarFormat(global?.options?.statusBarFormat, "global", warnings),
+      ...parseStatusBarFormat(project?.options?.statusBarFormat, "project", warnings),
+    },
   };
 
   // Rules are validated and collected with source metadata below.
@@ -849,7 +857,7 @@ function buildLoadResult(
   env: NodeJS.ProcessEnv,
   warnings: string[],
 ): LoadResult {
-  const config = mergeConfigs(globalData, projectData);
+  const config = mergeConfigs(globalData, projectData, warnings);
   const configuredRules: ConfiguredMaskingRule[] = [];
 
   function collect(

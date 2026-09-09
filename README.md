@@ -208,6 +208,25 @@ Rule or global-state changes received during an agent run activate before the ne
 
 Other options are `caseSensitive`, `showStatusBar`, and `systemPromptGuidance`; see the JSON Schema for defaults and descriptions.
 
+### Custom status bar text
+
+Set `options.statusBarFormat` in your global `~/.pi/agent/pi-data-masking/masking.config.json` or project `.pi/pi-data-masking/masking.config.json` (merge this into your existing options):
+
+```json
+{
+  "options": {
+    "statusBarFormat": {
+      "enabled": "🔒 {active}/{configured}",
+      "disabled": "🔓 off"
+    }
+  }
+}
+```
+
+`{active}` is the number of enabled, available rules (also the ready-rule count when masking is off); `{configured}` is the total valid configured-rule count. Templates support literal replacement only; unknown placeholders remain unchanged. Project templates override global templates **per state**. An omitted state inherits its global template, or the original text if neither source sets it.
+
+Changes use the existing config hot reload: during an active agent run they are queued until the next run. The ` · changes pending` suffix is still added automatically. `showStatusBar` remains the display switch. Templates must be single-line strings without control characters; invalid values warn and fall back to inherited/default text. An empty string is allowed (the pending suffix can still appear).
+
 ## FAQ
 
 ### How is this different from replacing values with `[REDACTED]`?

@@ -142,6 +142,23 @@
       "properties": {
         "caseSensitive": { "type": "boolean", "default": true },
         "showStatusBar": { "type": "boolean", "default": true },
+        "statusBarFormat": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Status templates with {active} and {configured} variables. Project overrides global per state; omitted states use the original text.",
+          "properties": {
+            "enabled": {
+              "type": "string",
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+              "default": "🔒 Masking: {active} active / {configured} configured"
+            },
+            "disabled": {
+              "type": "string",
+              "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]*$",
+              "default": "🔓 Masking: off · {active} rule(s) ready"
+            }
+          }
+        },
         "systemPromptGuidance": { "type": "boolean", "default": false },
         "persistHistory": { "type": "boolean", "default": true }
       }

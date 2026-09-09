@@ -37,6 +37,10 @@
   "options": {
     "caseSensitive": true,
     "showStatusBar": true,
+    "statusBarFormat": {
+      "enabled": "🔒 {active}/{configured}",
+      "disabled": "🔓 off"
+    },
     "systemPromptGuidance": false,
     "persistHistory": true
   }
